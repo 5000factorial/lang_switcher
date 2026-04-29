@@ -1,0 +1,14 @@
+pub mod atspi_bridge;
+pub mod cli;
+pub mod config;
+pub mod converter;
+pub mod daemon;
+pub mod doctor;
+pub mod gnome;
+pub mod hotkey;
+pub mod injector;
+pub mod input_capture;
+pub mod keymap;
+pub mod primary_selection;
+pub mod selection;
+pub mod word_buffer;

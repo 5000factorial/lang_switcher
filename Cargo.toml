@@ -1,0 +1,22 @@
+[package]
+name = "lang-switcher"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Fedora GNOME layout switcher daemon for Russian/English text correction"
+
+[dependencies]
+anyhow = "1.0"
+atspi = { version = "0.29", features = ["connection", "proxies", "zbus"] }
+clap = { version = "4.5", features = ["derive"] }
+dirs = "6.0"
+evdev = "0.13"
+futures-util = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "process"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3.20"
