@@ -107,11 +107,15 @@ static RU_REVERSE: LazyLock<HashMap<char, KeyStrokeSpec>> =
     LazyLock::new(|| build_reverse(Layout::Ru));
 
 pub fn parse_layout(name: &str) -> Option<Layout> {
-    match name {
-        "us" | "en" => Some(Layout::Us),
-        "ru" => Some(Layout::Ru),
-        _ => None,
+    let normalized = name.trim().to_ascii_lowercase();
+    for token in normalized.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+        match token {
+            "us" | "en" | "eng" => return Some(Layout::Us),
+            "ru" | "rus" => return Some(Layout::Ru),
+            _ => {}
+        }
     }
+    None
 }
 
 pub fn direction_from_layouts(source: Layout, target: Layout) -> Direction {
@@ -174,4 +178,23 @@ fn build_reverse(layout: Layout) -> HashMap<char, KeyStrokeSpec> {
         }
     }
     map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Layout, parse_layout};
+
+    #[test]
+    fn parses_plain_layout_names() {
+        assert_eq!(parse_layout("us"), Some(Layout::Us));
+        assert_eq!(parse_layout("ru"), Some(Layout::Ru));
+    }
+
+    #[test]
+    fn parses_variant_layout_names() {
+        assert_eq!(parse_layout("us+altgr-intl"), Some(Layout::Us));
+        assert_eq!(parse_layout("ru(phonetic)"), Some(Layout::Ru));
+        assert_eq!(parse_layout("xkb:us::eng"), Some(Layout::Us));
+        assert_eq!(parse_layout("xkb:ru::rus"), Some(Layout::Ru));
+    }
 }

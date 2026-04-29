@@ -168,7 +168,13 @@ async fn trigger_conversion(
             replacement_text,
         }) => {
             let target_name = input_sources.configured_name_for_layout(target_layout)?;
-            ensure_layout_switched(input_sources, &mut runtime.injector, &target_name).await?;
+            ensure_layout_switched(
+                input_sources,
+                &mut runtime.injector,
+                &target_name,
+                config.enable_alt_shift_fallback,
+            )
+            .await?;
             tokio::time::sleep(Duration::from_millis(config.post_switch_delay_ms)).await;
             runtime
                 .injector
@@ -191,7 +197,13 @@ async fn trigger_conversion(
     let Some(plan) = runtime.buffer.plan_conversion(current_layout, direction) else {
         return Ok(false);
     };
-    ensure_layout_switched(input_sources, &mut runtime.injector, &target_name).await?;
+    ensure_layout_switched(
+        input_sources,
+        &mut runtime.injector,
+        &target_name,
+        config.enable_alt_shift_fallback,
+    )
+    .await?;
     tokio::time::sleep(Duration::from_millis(config.post_switch_delay_ms)).await;
     runtime.injector.backspace(plan.delete_count)?;
     runtime
@@ -204,6 +216,7 @@ async fn ensure_layout_switched(
     input_sources: &InputSourceManager,
     injector: &mut Injector,
     target_name: &str,
+    enable_alt_shift_fallback: bool,
 ) -> Result<()> {
     input_sources.switch_to_layout_name(target_name).await?;
     if input_sources
@@ -213,7 +226,7 @@ async fn ensure_layout_switched(
         return Ok(());
     }
 
-    if input_sources.has_alt_shift_toggle().await? {
+    if enable_alt_shift_fallback && input_sources.has_alt_shift_toggle().await? {
         warn!("gsettings layout switch did not take effect, trying Alt+Shift fallback");
         injector.alt_shift_toggle()?;
         if input_sources

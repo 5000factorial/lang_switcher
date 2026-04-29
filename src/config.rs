@@ -18,6 +18,8 @@ pub struct ConfigFile {
     pub post_switch_delay_ms: u64,
     #[serde(default = "default_enable_selected_text")]
     pub enable_selected_text: bool,
+    #[serde(default = "default_enable_alt_shift_fallback")]
+    pub enable_alt_shift_fallback: bool,
     #[serde(default = "default_log_level")]
     pub log_level: String,
 }
@@ -31,6 +33,7 @@ pub struct AppConfig {
     pub buffer_len: usize,
     pub post_switch_delay_ms: u64,
     pub enable_selected_text: bool,
+    pub enable_alt_shift_fallback: bool,
     pub log_level: String,
 }
 
@@ -44,6 +47,7 @@ impl Default for AppConfig {
             buffer_len: default_buffer_len(),
             post_switch_delay_ms: default_post_switch_delay_ms(),
             enable_selected_text: default_enable_selected_text(),
+            enable_alt_shift_fallback: default_enable_alt_shift_fallback(),
             log_level: default_log_level(),
         }
     }
@@ -73,6 +77,7 @@ impl AppConfig {
             buffer_len: parsed.buffer_len,
             post_switch_delay_ms: parsed.post_switch_delay_ms,
             enable_selected_text: parsed.enable_selected_text,
+            enable_alt_shift_fallback: parsed.enable_alt_shift_fallback,
             log_level: parsed.log_level,
         })
     }
@@ -86,6 +91,7 @@ impl AppConfig {
             buffer_len: self.buffer_len,
             post_switch_delay_ms: self.post_switch_delay_ms,
             enable_selected_text: self.enable_selected_text,
+            enable_alt_shift_fallback: self.enable_alt_shift_fallback,
             log_level: self.log_level.clone(),
         };
         let serialized = toml::to_string_pretty(&file).context("failed to serialize config")?;
@@ -132,6 +138,10 @@ fn default_enable_selected_text() -> bool {
     true
 }
 
+fn default_enable_alt_shift_fallback() -> bool {
+    true
+}
+
 fn default_log_level() -> String {
     "info".to_owned()
 }
@@ -145,6 +155,7 @@ mod tests {
         let config = AppConfig::default();
         assert_eq!(config.layout_pair, ["us".to_owned(), "ru".to_owned()]);
         assert!(config.double_shift_timeout_ms > 0);
+        assert!(config.enable_alt_shift_fallback);
     }
 
     #[test]
@@ -156,6 +167,7 @@ mod tests {
             path: path.clone(),
             log_level: "debug".to_owned(),
             double_shift_timeout_ms: 123,
+            enable_alt_shift_fallback: false,
             ..AppConfig::default()
         };
         config.save().unwrap();
@@ -163,5 +175,6 @@ mod tests {
         let loaded = AppConfig::load_or_default(Some(&path)).unwrap();
         assert_eq!(loaded.log_level, "debug");
         assert_eq!(loaded.double_shift_timeout_ms, 123);
+        assert!(!loaded.enable_alt_shift_fallback);
     }
 }

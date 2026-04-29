@@ -72,6 +72,7 @@ pub async fn print_status(config: &AppConfig) -> Result<()> {
         "selection_mode: {}",
         selection::configured_mode(config.enable_selected_text)
     );
+    println!("alt_shift_fallback: {}", config.enable_alt_shift_fallback);
     Ok(())
 }
 
@@ -87,6 +88,7 @@ pub fn config_get(config: &AppConfig, key: &str) -> Result<()> {
         "buffer_len" => println!("{}", config.buffer_len),
         "post_switch_delay_ms" => println!("{}", config.post_switch_delay_ms),
         "enable_selected_text" => println!("{}", config.enable_selected_text),
+        "enable_alt_shift_fallback" => println!("{}", config.enable_alt_shift_fallback),
         "log_level" => println!("{}", config.log_level),
         "layout_pair" => println!("{},{}", config.layout_pair[0], config.layout_pair[1]),
         _ => bail!("unknown config key: {key}"),
@@ -108,6 +110,9 @@ pub fn config_set(config: &mut AppConfig, key: &str, value: &str) -> Result<()> 
         }
         "enable_selected_text" => {
             config.enable_selected_text = value.parse().context("invalid boolean")?
+        }
+        "enable_alt_shift_fallback" => {
+            config.enable_alt_shift_fallback = value.parse().context("invalid boolean")?
         }
         "log_level" => config.log_level = value.to_owned(),
         "layout_pair" => {

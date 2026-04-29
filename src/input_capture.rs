@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -17,9 +18,9 @@ pub struct KeyEvent {
 
 pub fn spawn(tx: UnboundedSender<KeyEvent>) {
     thread::spawn(move || {
-        let mut known = HashSet::new();
+        let known = Arc::new(Mutex::new(HashSet::new()));
         loop {
-            if let Err(error) = scan_devices(&tx, &mut known) {
+            if let Err(error) = scan_devices(&tx, &known) {
                 warn!("input scan failed: {error:#}");
             }
             thread::sleep(Duration::from_secs(3));
@@ -27,10 +28,13 @@ pub fn spawn(tx: UnboundedSender<KeyEvent>) {
     });
 }
 
-fn scan_devices(tx: &UnboundedSender<KeyEvent>, known: &mut HashSet<PathBuf>) -> Result<()> {
+fn scan_devices(
+    tx: &UnboundedSender<KeyEvent>,
+    known: &Arc<Mutex<HashSet<PathBuf>>>,
+) -> Result<()> {
     for entry in fs::read_dir("/dev/input").context("failed to read /dev/input")? {
         let path = entry?.path();
-        if !is_event_node(&path) || known.contains(&path) {
+        if !is_event_node(&path) || is_known(known, &path) {
             continue;
         }
 
@@ -47,14 +51,22 @@ fn scan_devices(tx: &UnboundedSender<KeyEvent>, known: &mut HashSet<PathBuf>) ->
             continue;
         }
 
-        known.insert(path.clone());
+        if !mark_known(known, &path) {
+            continue;
+        }
         let tx = tx.clone();
-        thread::spawn(move || read_device(path, device, tx));
+        let known = Arc::clone(known);
+        thread::spawn(move || read_device(path, device, tx, known));
     }
     Ok(())
 }
 
-fn read_device(path: PathBuf, mut device: Device, tx: UnboundedSender<KeyEvent>) {
+fn read_device(
+    path: PathBuf,
+    mut device: Device,
+    tx: UnboundedSender<KeyEvent>,
+    known: Arc<Mutex<HashSet<PathBuf>>>,
+) {
     loop {
         match device.fetch_events() {
             Ok(events) => {
@@ -62,12 +74,14 @@ fn read_device(path: PathBuf, mut device: Device, tx: UnboundedSender<KeyEvent>)
                     if let Some(key_event) = to_key_event(event)
                         && tx.send(key_event).is_err()
                     {
+                        forget_known(&known, &path);
                         return;
                     }
                 }
             }
             Err(error) => {
                 warn!("stopped reading {}: {error}", path.display());
+                forget_known(&known, &path);
                 return;
             }
         }
@@ -92,4 +106,24 @@ fn looks_like_keyboard(device: &Device) -> bool {
     device
         .supported_keys()
         .is_some_and(|keys| keys.contains(KeyCode::KEY_A) && keys.contains(KeyCode::KEY_SPACE))
+}
+
+fn is_known(known: &Arc<Mutex<HashSet<PathBuf>>>, path: &Path) -> bool {
+    known
+        .lock()
+        .map(|known| known.contains(path))
+        .unwrap_or(false)
+}
+
+fn mark_known(known: &Arc<Mutex<HashSet<PathBuf>>>, path: &Path) -> bool {
+    known
+        .lock()
+        .map(|mut known| known.insert(path.to_path_buf()))
+        .unwrap_or(false)
+}
+
+fn forget_known(known: &Arc<Mutex<HashSet<PathBuf>>>, path: &Path) {
+    if let Ok(mut known) = known.lock() {
+        known.remove(path);
+    }
 }

@@ -43,6 +43,7 @@ pub async fn run(config: &AppConfig) -> Result<()> {
         "selected_text_mode: {}",
         selection::configured_mode(config.enable_selected_text)
     );
+    println!("alt_shift_fallback: {}", config.enable_alt_shift_fallback);
     Ok(())
 }
 
