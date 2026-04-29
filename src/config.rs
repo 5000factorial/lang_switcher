@@ -55,9 +55,10 @@ impl AppConfig {
             .map(Path::to_path_buf)
             .unwrap_or_else(default_config_path);
         if !config_path.exists() {
-            let mut config = Self::default();
-            config.path = config_path;
-            return Ok(config);
+            return Ok(Self {
+                path: config_path,
+                ..Self::default()
+            });
         }
 
         let contents = fs::read_to_string(&config_path)
@@ -151,10 +152,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("config.toml");
 
-        let mut config = AppConfig::default();
-        config.path = path.clone();
-        config.log_level = "debug".to_owned();
-        config.double_shift_timeout_ms = 123;
+        let config = AppConfig {
+            path: path.clone(),
+            log_level: "debug".to_owned(),
+            double_shift_timeout_ms: 123,
+            ..AppConfig::default()
+        };
         config.save().unwrap();
 
         let loaded = AppConfig::load_or_default(Some(&path)).unwrap();

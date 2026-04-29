@@ -1,4 +1,9 @@
+use std::fs::OpenOptions;
+use std::io::ErrorKind;
+use std::path::Path;
+
 use anyhow::Result;
+use evdev::Device;
 
 use crate::config::AppConfig;
 use crate::gnome::InputSourceManager;
@@ -18,8 +23,8 @@ pub async fn run(config: &AppConfig) -> Result<()> {
         "wayland_display: {}",
         std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "<unset>".to_owned())
     );
-    println!("input_access: {}", access("/dev/input"));
-    println!("uinput_access: {}", access("/dev/uinput"));
+    println!("input_access: {}", input_access());
+    println!("uinput_access: {}", uinput_access());
 
     let sources = InputSourceManager::new(config.layout_pair.clone())
         .state()
@@ -41,9 +46,57 @@ pub async fn run(config: &AppConfig) -> Result<()> {
     Ok(())
 }
 
-fn access(path: &str) -> &'static str {
-    match std::fs::metadata(path) {
-        Ok(_) => "present",
-        Err(_) => "missing",
+fn input_access() -> &'static str {
+    let entries = match std::fs::read_dir("/dev/input") {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return "missing",
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => return "permission-denied",
+        Err(_) => return "unavailable",
+    };
+
+    let mut saw_event_node = false;
+    let mut saw_permission_denied = false;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !is_event_node(&path) {
+            continue;
+        }
+
+        saw_event_node = true;
+        match Device::open(&path) {
+            Ok(_) => return "present",
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+                saw_permission_denied = true;
+            }
+            Err(_) => {}
+        }
     }
+
+    if saw_permission_denied {
+        "permission-denied"
+    } else if saw_event_node {
+        "unreadable"
+    } else {
+        "missing"
+    }
+}
+
+fn uinput_access() -> &'static str {
+    match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/uinput")
+    {
+        Ok(_) => "present",
+        Err(error) if error.kind() == ErrorKind::NotFound => "missing",
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => "permission-denied",
+        Err(_) => "unavailable",
+    }
+}
+
+fn is_event_node(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("event"))
 }

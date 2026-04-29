@@ -51,12 +51,7 @@ impl WordBuffer {
     }
 
     pub fn pop_last_char(&mut self) {
-        while let Some(token) = self.tokens.pop_back() {
-            match token {
-                BufferToken::Break => break,
-                BufferToken::Char(_) | BufferToken::Literal(_) => return,
-            }
-        }
+        self.tokens.pop_back();
     }
 
     pub fn clear(&mut self) {

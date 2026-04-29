@@ -73,11 +73,19 @@ impl AtspiBridge {
         }
     }
 
-    pub async fn saw_recent_text_selection(&self) -> bool {
+    pub async fn should_try_primary_selection(&self) -> bool {
         let Some(selected) = self.selected.read().await.clone() else {
             return false;
         };
-        selected.seen_at.elapsed() <= Self::SELECTION_SIGNAL_TTL
+        if selected.seen_at.elapsed() > Self::SELECTION_SIGNAL_TTL {
+            return false;
+        }
+
+        let Some(focused) = self.focused.read().await.clone() else {
+            return false;
+        };
+
+        cached_objects_related(&selected, &focused)
     }
 
     pub async fn clear_recent_text_selection(&self) {
@@ -88,22 +96,20 @@ impl AtspiBridge {
         &self,
         current_layout: Layout,
     ) -> Result<Option<SelectionConversion>> {
-        if let Some(selected) = self.selected.read().await.clone() {
-            if let Some(result) = self
+        if let Some(selected) = self.selected.read().await.clone()
+            && let Some(result) = self
                 .try_convert_selection_from_cached(selected, current_layout)
                 .await?
-            {
-                return Ok(Some(result));
-            }
+        {
+            return Ok(Some(result));
         }
 
-        if let Some(cached) = self.focused.read().await.clone() {
-            if let Some(result) = self
+        if let Some(cached) = self.focused.read().await.clone()
+            && let Some(result) = self
                 .try_convert_selection_from_cached(cached, current_layout)
                 .await?
-            {
-                return Ok(Some(result));
-            }
+        {
+            return Ok(Some(result));
         }
 
         let mut candidates = Vec::new();
@@ -112,13 +118,12 @@ impl AtspiBridge {
         }
         let candidate_snapshot = candidates.clone();
         for candidate in candidate_snapshot {
-            if let Some(application_root) = self.application_root_for_object(&candidate).await? {
-                if !candidates
+            if let Some(application_root) = self.application_root_for_object(&candidate).await?
+                && !candidates
                     .iter()
                     .any(|known| same_object_ref(known, &application_root))
-                {
-                    candidates.push(application_root);
-                }
+            {
+                candidates.push(application_root);
             }
         }
         for application_root in self.registry_application_roots().await? {
@@ -147,15 +152,17 @@ impl AtspiBridge {
         cached: CachedObject,
         current_layout: Layout,
     ) -> Result<Option<SelectionConversion>> {
-        if let Some(application_root) = cached.application_root.clone() {
-            if !same_object_ref(&application_root, &cached.object) {
-                if let Some(result) = self
-                    .search_subtree_with_timeout(application_root, current_layout)
-                    .await?
-                {
-                    return Ok(Some(result));
-                }
-            }
+        if let Some(application_root) = cached.application_root.clone()
+            && !same_object_ref(&application_root, &cached.object)
+            && let Some(result) = self
+                .search_subtree_with_timeout(application_root, current_layout)
+                .await?
+        {
+            return Ok(Some(result));
+        } else if let Some(application_root) = cached.application_root.clone()
+            && !same_object_ref(&application_root, &cached.object)
+        {
+            // fall through to the cached object itself if the wider app search found nothing
         }
 
         self.search_subtree_with_timeout(cached.object, current_layout)
@@ -222,7 +229,7 @@ impl AtspiBridge {
             };
 
             for child in children.into_iter().rev() {
-                stack.push((child.into(), depth + 1));
+                stack.push((child, depth + 1));
             }
         }
 
@@ -302,10 +309,8 @@ impl AtspiBridge {
             Err(_) => return Ok(None),
         };
 
-        let mut stack: Vec<(ObjectRefOwned, usize)> = children
-            .into_iter()
-            .map(|child| (child.into(), 0usize))
-            .collect();
+        let mut stack: Vec<(ObjectRefOwned, usize)> =
+            children.into_iter().map(|child| (child, 0usize)).collect();
 
         while let Some((object, depth)) = stack.pop() {
             if depth > 48 {
@@ -343,7 +348,7 @@ impl AtspiBridge {
             };
 
             for child in children {
-                stack.push((child.into(), depth + 1));
+                stack.push((child, depth + 1));
             }
         }
 
@@ -358,7 +363,7 @@ impl AtspiBridge {
         };
 
         match root.get_children().await {
-            Ok(children) => Ok(children.into_iter().map(Into::into).collect()),
+            Ok(children) => Ok(children),
             Err(_) => Ok(Vec::new()),
         }
     }
@@ -406,7 +411,15 @@ impl AtspiBridge {
                             if is_text_focus_candidate(connection.as_ref(), &object_ref).await {
                                 let cached =
                                     build_cached_object(connection.as_ref(), object_ref).await;
+                                if let Some(selected_hint) = selected.read().await.clone()
+                                    && !cached_objects_related(&selected_hint, &cached)
+                                {
+                                    *selected.write().await = None;
+                                }
                                 *focused.write().await = Some(cached);
+                            } else {
+                                *focused.write().await = None;
+                                *selected.write().await = None;
                             }
                         }
 
@@ -417,7 +430,10 @@ impl AtspiBridge {
                             if is_text_focus_candidate(connection.as_ref(), &object_ref).await {
                                 let cached =
                                     build_cached_object(connection.as_ref(), object_ref).await;
+                                *focused.write().await = Some(cached.clone());
                                 *selected.write().await = Some(cached);
+                            } else {
+                                *selected.write().await = None;
                             }
                         }
                     }
@@ -435,6 +451,15 @@ impl AtspiBridge {
 
 fn same_object_ref(left: &ObjectRefOwned, right: &ObjectRefOwned) -> bool {
     left.path_as_str() == right.path_as_str() && left.name_as_str() == right.name_as_str()
+}
+
+fn cached_objects_related(left: &CachedObject, right: &CachedObject) -> bool {
+    same_object_ref(&left.object, &right.object)
+        || left
+            .application_root
+            .as_ref()
+            .zip(right.application_root.as_ref())
+            .is_some_and(|(left_root, right_root)| same_object_ref(left_root, right_root))
 }
 
 fn can_inject_text(layout: Layout, text: &str) -> bool {

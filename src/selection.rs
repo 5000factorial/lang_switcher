@@ -17,15 +17,6 @@ pub enum SelectionOutcome {
     Unsupported,
 }
 
-impl SelectionOutcome {
-    pub fn target_layout(self) -> Option<Layout> {
-        match self {
-            Self::Handled { target_layout, .. } => Some(target_layout),
-            Self::NoSelection | Self::Unsupported => None,
-        }
-    }
-}
-
 pub async fn try_handle_selection(
     atspi: Option<&AtspiBridge>,
     current_layout: Layout,
@@ -41,10 +32,6 @@ pub async fn try_handle_selection(
         }
         None => try_primary_selection_fallback(atspi, current_layout).await,
     }
-}
-
-pub fn should_fallback_to_last_word(result: &Result<SelectionOutcome>) -> bool {
-    !matches!(result, Ok(SelectionOutcome::Handled { .. }))
 }
 
 pub fn configured_mode(enabled: bool) -> &'static str {
@@ -66,14 +53,14 @@ async fn try_primary_selection_fallback(
     atspi: &AtspiBridge,
     current_layout: Layout,
 ) -> Result<SelectionOutcome> {
-    if !atspi.saw_recent_text_selection().await {
+    if !atspi.should_try_primary_selection().await {
         return Ok(SelectionOutcome::NoSelection);
     }
 
     let Some(selected) = primary_selection::read(Duration::from_millis(200)).await? else {
         return Ok(SelectionOutcome::NoSelection);
     };
-    if selected.trim().is_empty() {
+    if !primary_selection::looks_like_live_selection(&selected) {
         return Ok(SelectionOutcome::NoSelection);
     }
 
@@ -102,29 +89,29 @@ mod tests {
 
     #[test]
     fn handled_selection_skips_last_word_fallback() {
-        let result = Ok(SelectionOutcome::Handled {
+        let result: Result<SelectionOutcome> = Ok(SelectionOutcome::Handled {
             target_layout: Layout::Us,
             replacement_text: "hello".to_owned(),
         });
-        assert!(!should_fallback_to_last_word(&result));
+        assert!(matches!(result, Ok(SelectionOutcome::Handled { .. })));
     }
 
     #[test]
     fn missing_selection_uses_last_word_fallback() {
-        let result = Ok(SelectionOutcome::NoSelection);
-        assert!(should_fallback_to_last_word(&result));
+        let result: Result<SelectionOutcome> = Ok(SelectionOutcome::NoSelection);
+        assert!(!matches!(result, Ok(SelectionOutcome::Handled { .. })));
     }
 
     #[test]
     fn unsupported_selection_uses_last_word_fallback() {
-        let result = Ok(SelectionOutcome::Unsupported);
-        assert!(should_fallback_to_last_word(&result));
+        let result: Result<SelectionOutcome> = Ok(SelectionOutcome::Unsupported);
+        assert!(!matches!(result, Ok(SelectionOutcome::Handled { .. })));
     }
 
     #[test]
     fn selection_errors_still_use_last_word_fallback() {
         let result: Result<SelectionOutcome> = Err(anyhow!("boom"));
-        assert!(should_fallback_to_last_word(&result));
+        assert!(!matches!(result, Ok(SelectionOutcome::Handled { .. })));
     }
 
     #[test]

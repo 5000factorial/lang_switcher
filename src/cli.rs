@@ -209,8 +209,3 @@ fn install_binary(source: &Path, destination: &Path) -> Result<()> {
 
     Ok(())
 }
-
-#[allow(dead_code)]
-fn _normalize_path(path: &Path) -> String {
-    path.display().to_string()
-}

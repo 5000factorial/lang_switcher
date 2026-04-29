@@ -19,7 +19,7 @@ pub async fn run(config: AppConfig) -> Result<()> {
     info!("starting lang-switcher daemon");
 
     let input_sources = InputSourceManager::new(config.layout_pair.clone());
-    let mut injector = create_injector_with_retry().await?;
+    let injector = create_injector_with_retry().await?;
     let atspi = if config.enable_selected_text {
         match AtspiBridge::new().await {
             Ok(bridge) => Some(bridge),
@@ -35,10 +35,16 @@ pub async fn run(config: AppConfig) -> Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     crate::input_capture::spawn(tx);
 
-    let mut buffer = WordBuffer::new(config.buffer_len);
-    let mut detector =
-        DoubleShiftDetector::new(config.double_shift_timeout_ms, config.max_shift_hold_ms);
-    let mut modifiers = ModifierState::default();
+    let mut runtime = RuntimeState {
+        buffer: WordBuffer::new(config.buffer_len),
+        detector: DoubleShiftDetector::new(
+            config.double_shift_timeout_ms,
+            config.max_shift_hold_ms,
+        ),
+        modifiers: ModifierState::default(),
+        atspi,
+        injector,
+    };
 
     loop {
         tokio::select! {
@@ -50,14 +56,10 @@ pub async fn run(config: AppConfig) -> Result<()> {
                 if handle_key_event(
                     &config,
                     event,
-                    &mut modifiers,
-                    &mut detector,
-                    &mut buffer,
                     &input_sources,
-                    atspi.as_ref(),
-                    &mut injector,
+                    &mut runtime,
                 ).await? {
-                    buffer.clear();
+                    runtime.buffer.clear();
                 }
             }
         }
@@ -94,21 +96,17 @@ async fn create_injector_with_retry() -> Result<Injector> {
 async fn handle_key_event(
     config: &AppConfig,
     event: KeyEvent,
-    modifiers: &mut ModifierState,
-    detector: &mut DoubleShiftDetector,
-    buffer: &mut WordBuffer,
     input_sources: &InputSourceManager,
-    atspi: Option<&AtspiBridge>,
-    injector: &mut Injector,
+    runtime: &mut RuntimeState,
 ) -> Result<bool> {
     let now = Instant::now();
-    update_modifier_state(modifiers, event);
+    update_modifier_state(&mut runtime.modifiers, event);
 
     if is_shift_key(event.code) {
         if event.value == 1 {
-            detector.on_shift_press(now);
-        } else if event.value == 0 && detector.on_shift_release(now) {
-            return trigger_conversion(config, buffer, input_sources, atspi, injector).await;
+            runtime.detector.on_shift_press(now);
+        } else if event.value == 0 && runtime.detector.on_shift_release(now) {
+            return trigger_conversion(config, input_sources, runtime).await;
         }
         return Ok(false);
     }
@@ -117,34 +115,37 @@ async fn handle_key_event(
         return Ok(false);
     }
 
-    if key_clears_selection_cache(event.code, modifiers.shift) {
-        if let Some(atspi) = atspi {
-            atspi.clear_recent_text_selection().await;
-        }
+    if key_clears_selection_cache(event.code, runtime.modifiers.shift)
+        && let Some(atspi) = runtime.atspi.as_ref()
+    {
+        atspi.clear_recent_text_selection().await;
     }
 
-    if modifiers.ctrl || modifiers.alt || modifiers.meta {
-        detector.invalidate_sequence();
-        buffer.push_break();
+    if runtime.modifiers.ctrl || runtime.modifiers.alt || runtime.modifiers.meta {
+        if let Some(atspi) = runtime.atspi.as_ref() {
+            atspi.clear_recent_text_selection().await;
+        }
+        runtime.detector.invalidate_sequence();
+        runtime.buffer.push_break();
         return Ok(false);
     }
 
-    detector.invalidate_sequence();
+    runtime.detector.invalidate_sequence();
 
     match event.code {
-        KeyCode::KEY_BACKSPACE => buffer.pop_last_char(),
-        KeyCode::KEY_SPACE => buffer.push_literal(' '),
-        KeyCode::KEY_TAB => buffer.push_literal('\t'),
-        KeyCode::KEY_ENTER => buffer.push_literal('\n'),
+        KeyCode::KEY_BACKSPACE => runtime.buffer.pop_last_char(),
+        KeyCode::KEY_SPACE => runtime.buffer.push_literal(' '),
+        KeyCode::KEY_TAB => runtime.buffer.push_literal('\t'),
+        KeyCode::KEY_ENTER => runtime.buffer.push_literal('\n'),
         KeyCode::KEY_LEFT | KeyCode::KEY_RIGHT | KeyCode::KEY_UP | KeyCode::KEY_DOWN => {
-            buffer.push_break()
+            runtime.buffer.push_break()
         }
         KeyCode::KEY_DELETE | KeyCode::KEY_HOME | KeyCode::KEY_END | KeyCode::KEY_ESC => {
-            buffer.push_break()
+            runtime.buffer.push_break()
         }
         code => {
-            if crate::keymap::key_to_char(code, Layout::Us, modifiers.shift).is_some() {
-                buffer.push_char(code, modifiers.shift);
+            if crate::keymap::key_to_char(code, Layout::Us, runtime.modifiers.shift).is_some() {
+                runtime.buffer.push_char(code, runtime.modifiers.shift);
             }
         }
     }
@@ -154,23 +155,24 @@ async fn handle_key_event(
 
 async fn trigger_conversion(
     config: &AppConfig,
-    buffer: &mut WordBuffer,
     input_sources: &InputSourceManager,
-    atspi: Option<&AtspiBridge>,
-    injector: &mut Injector,
+    runtime: &mut RuntimeState,
 ) -> Result<bool> {
     let current_layout = input_sources.current_layout().await?;
 
-    let selection_result = selection::try_handle_selection(atspi, current_layout).await;
+    let selection_result =
+        selection::try_handle_selection(runtime.atspi.as_ref(), current_layout).await;
     match selection_result {
         Ok(SelectionOutcome::Handled {
             target_layout,
             replacement_text,
         }) => {
             let target_name = input_sources.configured_name_for_layout(target_layout)?;
-            ensure_layout_switched(input_sources, injector, &target_name).await?;
+            ensure_layout_switched(input_sources, &mut runtime.injector, &target_name).await?;
             tokio::time::sleep(Duration::from_millis(config.post_switch_delay_ms)).await;
-            injector.type_text(target_layout, &replacement_text)?;
+            runtime
+                .injector
+                .type_text(target_layout, &replacement_text)?;
             return Ok(true);
         }
         Ok(SelectionOutcome::NoSelection | SelectionOutcome::Unsupported) => {}
@@ -186,13 +188,15 @@ async fn trigger_conversion(
         _ => return Ok(false),
     };
 
-    let Some(plan) = buffer.plan_conversion(current_layout, direction) else {
+    let Some(plan) = runtime.buffer.plan_conversion(current_layout, direction) else {
         return Ok(false);
     };
-    ensure_layout_switched(input_sources, injector, &target_name).await?;
+    ensure_layout_switched(input_sources, &mut runtime.injector, &target_name).await?;
     tokio::time::sleep(Duration::from_millis(config.post_switch_delay_ms)).await;
-    injector.backspace(plan.delete_count)?;
-    injector.type_text(target_layout, &plan.replacement_text)?;
+    runtime.injector.backspace(plan.delete_count)?;
+    runtime
+        .injector
+        .type_text(target_layout, &plan.replacement_text)?;
     Ok(true)
 }
 
@@ -229,6 +233,14 @@ struct ModifierState {
     ctrl: bool,
     alt: bool,
     meta: bool,
+}
+
+struct RuntimeState {
+    buffer: WordBuffer,
+    detector: DoubleShiftDetector,
+    modifiers: ModifierState,
+    atspi: Option<AtspiBridge>,
+    injector: Injector,
 }
 
 fn update_modifier_state(state: &mut ModifierState, event: KeyEvent) {

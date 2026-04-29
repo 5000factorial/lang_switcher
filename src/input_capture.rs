@@ -59,10 +59,10 @@ fn read_device(path: PathBuf, mut device: Device, tx: UnboundedSender<KeyEvent>)
         match device.fetch_events() {
             Ok(events) => {
                 for event in events {
-                    if let Some(key_event) = to_key_event(event) {
-                        if tx.send(key_event).is_err() {
-                            return;
-                        }
+                    if let Some(key_event) = to_key_event(event)
+                        && tx.send(key_event).is_err()
+                    {
+                        return;
                     }
                 }
             }
