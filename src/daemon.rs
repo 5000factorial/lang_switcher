@@ -15,6 +15,9 @@ use crate::keymap::{Direction, Layout};
 use crate::selection::{self, SelectionOutcome};
 use crate::word_buffer::WordBuffer;
 
+const CONVERSION_TIMEOUT: Duration = Duration::from_secs(2);
+const SELECTION_TIMEOUT: Duration = Duration::from_millis(700);
+
 pub async fn run(config: AppConfig) -> Result<()> {
     info!("starting lang-switcher daemon");
 
@@ -112,7 +115,15 @@ async fn handle_key_event(
         if event.value == 1 {
             runtime.detector.on_shift_press(now);
         } else if event.value == 0 && runtime.detector.on_shift_release(now) {
-            return trigger_conversion(config, input_sources, runtime).await;
+            return match tokio::time::timeout(
+                CONVERSION_TIMEOUT,
+                trigger_conversion(config, input_sources, runtime),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => anyhow::bail!("conversion timed out"),
+            };
         }
         return Ok(false);
     }
@@ -158,8 +169,12 @@ async fn try_selected_text_conversion(
     runtime: &mut RuntimeState,
     current_layout: Layout,
 ) -> Result<bool> {
-    let selection_result =
-        selection::try_handle_selection(runtime.atspi.as_ref(), current_layout).await;
+    let selection_result = selection::try_handle_selection_with_atspi_timeout(
+        runtime.atspi.as_ref(),
+        current_layout,
+        SELECTION_TIMEOUT,
+    )
+    .await;
     match selection_result {
         Ok(SelectionOutcome::Handled {
             target_layout,

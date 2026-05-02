@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::process::Command;
-use tokio::time::{Duration, Instant, sleep};
+use tokio::time::{Duration, Instant, sleep, timeout};
 
 use crate::keymap::{Layout, parse_layout};
 
@@ -96,20 +96,17 @@ impl InputSourceManager {
             bail!("layout `{target_name}` not found in GNOME input sources");
         };
 
-        let status = Command::new("gsettings")
-            .args([
+        run_gsettings_status(
+            [
                 "set",
                 "org.gnome.desktop.input-sources",
                 "current",
                 &index.to_string(),
-            ])
-            .status()
-            .await
-            .context("failed to execute gsettings set")?;
-
-        if !status.success() {
-            bail!("gsettings failed to switch the current layout");
-        }
+            ],
+            GSETTINGS_SET_TIMEOUT,
+            "set current layout",
+        )
+        .await?;
         Ok(())
     }
 
@@ -137,18 +134,58 @@ impl InputSourceManager {
     }
 }
 
+const GSETTINGS_GET_TIMEOUT: Duration = Duration::from_millis(1200);
+const GSETTINGS_SET_TIMEOUT: Duration = Duration::from_millis(1500);
+
 async fn gsettings_get(key: &str) -> Result<String> {
-    let output = Command::new("gsettings")
-        .args(["get", "org.gnome.desktop.input-sources", key])
-        .output()
+    let output = run_gsettings_output(
+        ["get", "org.gnome.desktop.input-sources", key],
+        GSETTINGS_GET_TIMEOUT,
+        &format!("get for key `{key}`"),
+    )
+    .await?;
+
+    Ok(output)
+}
+
+async fn run_gsettings_output<const N: usize>(
+    args: [&str; N],
+    deadline: Duration,
+    description: &str,
+) -> Result<String> {
+    let mut command = Command::new("gsettings");
+    command.kill_on_drop(true).args(args);
+
+    let output = timeout(deadline, command.output())
         .await
-        .with_context(|| format!("failed to execute gsettings get for key `{key}`"))?;
+        .map_err(|_| anyhow!("gsettings {description} timed out"))?
+        .with_context(|| format!("failed to execute gsettings {description}"))?;
 
     if !output.status.success() {
-        bail!("gsettings get `{key}` failed");
+        bail!("gsettings {description} failed");
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+async fn run_gsettings_status<const N: usize>(
+    args: [&str; N],
+    deadline: Duration,
+    description: &str,
+) -> Result<()> {
+    let mut command = Command::new("gsettings");
+    command.kill_on_drop(true).args(args);
+
+    let status = timeout(deadline, command.status())
+        .await
+        .map_err(|_| anyhow!("gsettings {description} timed out"))?
+        .with_context(|| format!("failed to execute gsettings {description}"))?;
+
+    if !status.success() {
+        bail!("gsettings {description} failed");
+    }
+
+    Ok(())
 }
 
 fn parse_current_index(raw: &str) -> Result<usize> {

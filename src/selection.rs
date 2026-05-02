@@ -1,6 +1,8 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use tokio::time::timeout;
+use tracing::warn;
 
 use crate::atspi_bridge::{AtspiBridge, SelectionConversion};
 use crate::converter::{convert_text, detect_selection_direction};
@@ -31,6 +33,32 @@ pub async fn try_handle_selection(
             Ok(outcome_from_conversion(conversion))
         }
         None => try_primary_selection_fallback(atspi, current_layout).await,
+    }
+}
+
+pub async fn try_handle_selection_with_atspi_timeout(
+    atspi: Option<&AtspiBridge>,
+    current_layout: Layout,
+    atspi_timeout: Duration,
+) -> Result<SelectionOutcome> {
+    let Some(atspi) = atspi else {
+        return Ok(SelectionOutcome::Unsupported);
+    };
+
+    match timeout(atspi_timeout, atspi.try_convert_selection(current_layout)).await {
+        Ok(Ok(Some(conversion))) => {
+            atspi.clear_recent_text_selection().await;
+            Ok(outcome_from_conversion(conversion))
+        }
+        Ok(Ok(None)) => try_primary_selection_fallback(atspi, current_layout).await,
+        Ok(Err(error)) => {
+            warn!("AT-SPI selection lookup failed, trying PRIMARY fallback: {error:#}");
+            try_primary_selection_fallback(atspi, current_layout).await
+        }
+        Err(_) => {
+            warn!("AT-SPI selection lookup timed out, trying PRIMARY fallback");
+            try_primary_selection_fallback(atspi, current_layout).await
+        }
     }
 }
 
