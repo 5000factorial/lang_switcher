@@ -38,6 +38,7 @@ pub struct AtspiBridge {
 impl AtspiBridge {
     const CACHED_SEARCH_TIMEOUT: Duration = Duration::from_millis(250);
     const SELECTION_SIGNAL_TTL: Duration = Duration::from_millis(1200);
+    const RELAXED_SELECTION_SIGNAL_TTL: Duration = Duration::from_millis(4000);
 
     pub async fn new() -> Result<Self> {
         let connection = Arc::new(AccessibilityConnection::new().await?);
@@ -85,6 +86,14 @@ impl AtspiBridge {
         };
 
         cached_objects_related(&selected, &focused)
+    }
+
+    pub async fn should_try_primary_selection_relaxed(&self) -> bool {
+        let Some(selected) = self.selected.read().await.clone() else {
+            return false;
+        };
+
+        selected.seen_at.elapsed() <= Self::RELAXED_SELECTION_SIGNAL_TTL
     }
 
     pub async fn clear_recent_text_selection(&self) {

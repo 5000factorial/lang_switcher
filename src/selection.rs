@@ -32,7 +32,7 @@ pub async fn try_handle_selection(
             atspi.clear_recent_text_selection().await;
             Ok(outcome_from_conversion(conversion))
         }
-        None => try_primary_selection_fallback(atspi, current_layout).await,
+        None => try_primary_selection_fallback(atspi, current_layout, false).await,
     }
 }
 
@@ -50,14 +50,14 @@ pub async fn try_handle_selection_with_atspi_timeout(
             atspi.clear_recent_text_selection().await;
             Ok(outcome_from_conversion(conversion))
         }
-        Ok(Ok(None)) => try_primary_selection_fallback(atspi, current_layout).await,
+        Ok(Ok(None)) => try_primary_selection_fallback(atspi, current_layout, false).await,
         Ok(Err(error)) => {
             warn!("AT-SPI selection lookup failed, trying PRIMARY fallback: {error:#}");
-            try_primary_selection_fallback(atspi, current_layout).await
+            try_primary_selection_fallback(atspi, current_layout, true).await
         }
         Err(_) => {
             warn!("AT-SPI selection lookup timed out, trying PRIMARY fallback");
-            try_primary_selection_fallback(atspi, current_layout).await
+            try_primary_selection_fallback(atspi, current_layout, true).await
         }
     }
 }
@@ -80,8 +80,15 @@ fn outcome_from_conversion(conversion: SelectionConversion) -> SelectionOutcome 
 async fn try_primary_selection_fallback(
     atspi: &AtspiBridge,
     current_layout: Layout,
+    relaxed_hint_gate: bool,
 ) -> Result<SelectionOutcome> {
-    if !atspi.should_try_primary_selection().await {
+    let should_try = if relaxed_hint_gate {
+        atspi.should_try_primary_selection_relaxed().await
+    } else {
+        atspi.should_try_primary_selection().await
+    };
+
+    if !should_try {
         return Ok(SelectionOutcome::NoSelection);
     }
 
