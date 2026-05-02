@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
@@ -135,6 +136,11 @@ pub fn config_set(config: &mut AppConfig, key: &str, value: &str) -> Result<()> 
 }
 
 pub fn install(config: &AppConfig, print_udev_rules: bool) -> Result<()> {
+    if print_udev_rules {
+        println!("{}", udev_rules());
+        return Ok(());
+    }
+
     let home = dirs::home_dir().context("failed to resolve home directory")?;
     let local_bin = home.join(".local/bin");
     let systemd_user = home.join(".config/systemd/user");
@@ -154,7 +160,7 @@ pub fn install(config: &AppConfig, print_udev_rules: bool) -> Result<()> {
     }
 
     let service = format!(
-        "[Unit]\nDescription=lang-switcher daemon\nAfter=graphical-session.target\nPartOf=graphical-session.target\n\n[Service]\nType=simple\nExecStart={} --config-path {} run\nRestart=on-failure\nRestartSec=1\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=lang-switcher daemon\nAfter=graphical-session.target\nPartOf=graphical-session.target\n\n[Service]\nType=simple\nExecStart={} --config-path {} run\nRestart=always\nRestartSec=1\n\n[Install]\nWantedBy=graphical-session.target\n",
         installed_bin.display(),
         config.path.display()
     );
@@ -163,20 +169,24 @@ pub fn install(config: &AppConfig, print_udev_rules: bool) -> Result<()> {
 
     println!("installed binary: {}", installed_bin.display());
     println!("installed service: {}", service_path.display());
-    println!("next:");
-    println!("  systemctl --user daemon-reload");
-    println!("  systemctl --user enable --now lang-switcher.service");
-
-    if print_udev_rules {
-        println!();
-        println!("{}", udev_rules());
-    } else {
-        println!("optional:");
-        println!(
-            "  {} install --print-udev-rules | sudo tee /etc/udev/rules.d/99-lang-switcher.rules",
-            installed_bin.display()
-        );
+    match enable_user_service("lang-switcher.service") {
+        Ok(()) => {
+            println!("autostart: enabled");
+            println!("service: started");
+        }
+        Err(error) => {
+            println!("autostart: not enabled automatically ({error:#})");
+            println!("next:");
+            println!("  systemctl --user daemon-reload");
+            println!("  systemctl --user enable --now lang-switcher.service");
+        }
     }
+
+    println!("optional:");
+    println!(
+        "  {} install --print-udev-rules | sudo tee /etc/udev/rules.d/99-lang-switcher.rules",
+        installed_bin.display()
+    );
 
     Ok(())
 }
@@ -211,6 +221,28 @@ fn install_binary(source: &Path, destination: &Path) -> Result<()> {
             destination.display()
         )
     })?;
+
+    Ok(())
+}
+
+fn enable_user_service(unit: &str) -> Result<()> {
+    run_systemctl(["--user", "daemon-reload"])?;
+    run_systemctl(["--user", "enable", unit])?;
+    if run_systemctl(["--user", "restart", unit]).is_err() {
+        run_systemctl(["--user", "start", unit])?;
+    }
+    Ok(())
+}
+
+fn run_systemctl<const N: usize>(args: [&str; N]) -> Result<()> {
+    let status = Command::new("systemctl")
+        .args(args)
+        .status()
+        .context("failed to start systemctl")?;
+
+    if !status.success() {
+        bail!("systemctl {:?} exited with status {status}", args);
+    }
 
     Ok(())
 }

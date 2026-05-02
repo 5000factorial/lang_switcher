@@ -111,11 +111,22 @@ Go back to the project directory and run:
 ```bash
 cd /home/user/Documents/lang_switcher
 ./target/release/lang-switcher install
+```
+
+The installer now tries to do this automatically:
+- install the binary to `~/.local/bin`
+- create the `systemd --user` service
+- enable autostart
+- start the service right away
+
+If automatic enabling fails for some reason, run:
+
+```bash
 systemctl --user daemon-reload
 systemctl --user enable --now lang-switcher.service
 ```
 
-After that, the app will start automatically in your user session.
+After that, the app will start automatically every time you log into GNOME.
 
 ### 9. Verify that it started
 
@@ -126,6 +137,8 @@ systemctl --user status lang-switcher.service
 ```
 
 If everything is fine, the service status should be `active (running)`.
+
+The app is designed to run as a background user service. If it ever exits unexpectedly, `systemd` will try to start it again automatically.
 
 ## Quick Test
 

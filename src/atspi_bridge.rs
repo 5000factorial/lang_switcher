@@ -66,8 +66,7 @@ impl AtspiBridge {
                 } else {
                     warn!("AT-SPI selection conversion failed: {error:#}");
                 }
-                *self.focused.write().await = None;
-                *self.selected.write().await = None;
+                self.clear_all_hints().await;
                 Ok(None)
             }
         }
@@ -96,7 +95,31 @@ impl AtspiBridge {
         &self,
         current_layout: Layout,
     ) -> Result<Option<SelectionConversion>> {
-        if let Some(selected) = self.selected.read().await.clone()
+        if let Some(result) = self.try_cached_selection(current_layout).await? {
+            return Ok(Some(result));
+        }
+
+        self.try_search_roots(current_layout).await
+    }
+
+    async fn clear_all_hints(&self) {
+        *self.focused.write().await = None;
+        *self.selected.write().await = None;
+    }
+
+    async fn focused_hint(&self) -> Option<CachedObject> {
+        self.focused.read().await.clone()
+    }
+
+    async fn selected_hint(&self) -> Option<CachedObject> {
+        self.selected.read().await.clone()
+    }
+
+    async fn try_cached_selection(
+        &self,
+        current_layout: Layout,
+    ) -> Result<Option<SelectionConversion>> {
+        if let Some(selected) = self.selected_hint().await
             && let Some(result) = self
                 .try_convert_selection_from_cached(selected, current_layout)
                 .await?
@@ -104,38 +127,22 @@ impl AtspiBridge {
             return Ok(Some(result));
         }
 
-        if let Some(cached) = self.focused.read().await.clone()
+        if let Some(focused) = self.focused_hint().await
             && let Some(result) = self
-                .try_convert_selection_from_cached(cached, current_layout)
+                .try_convert_selection_from_cached(focused, current_layout)
                 .await?
         {
             return Ok(Some(result));
         }
 
-        let mut candidates = Vec::new();
-        if let Some(discovered) = self.discover_focused_object().await? {
-            candidates.push(discovered);
-        }
-        let candidate_snapshot = candidates.clone();
-        for candidate in candidate_snapshot {
-            if let Some(application_root) = self.application_root_for_object(&candidate).await?
-                && !candidates
-                    .iter()
-                    .any(|known| same_object_ref(known, &application_root))
-            {
-                candidates.push(application_root);
-            }
-        }
-        for application_root in self.registry_application_roots().await? {
-            if !candidates
-                .iter()
-                .any(|known| same_object_ref(known, &application_root))
-            {
-                candidates.push(application_root);
-            }
-        }
+        Ok(None)
+    }
 
-        for candidate in candidates {
+    async fn try_search_roots(
+        &self,
+        current_layout: Layout,
+    ) -> Result<Option<SelectionConversion>> {
+        for candidate in self.candidate_roots().await? {
             if let Some(result) = self
                 .try_convert_selection_in_subtree(candidate, current_layout)
                 .await?
@@ -145,6 +152,26 @@ impl AtspiBridge {
         }
 
         Ok(None)
+    }
+
+    async fn candidate_roots(&self) -> Result<Vec<ObjectRefOwned>> {
+        let mut candidates = Vec::new();
+        if let Some(discovered) = self.discover_focused_object().await? {
+            push_unique_object(&mut candidates, discovered);
+        }
+
+        let candidate_snapshot = candidates.clone();
+        for candidate in candidate_snapshot {
+            if let Some(application_root) = self.application_root_for_object(&candidate).await? {
+                push_unique_object(&mut candidates, application_root);
+            }
+        }
+
+        for application_root in self.registry_application_roots().await? {
+            push_unique_object(&mut candidates, application_root);
+        }
+
+        Ok(candidates)
     }
 
     async fn try_convert_selection_from_cached(
@@ -407,34 +434,25 @@ impl AtspiBridge {
                 match event {
                     Ok(event) => {
                         if let Ok(focus) = FocusEvents::try_from(event.clone()) {
-                            let object_ref: ObjectRefOwned = focus.object_ref().into();
-                            if is_text_focus_candidate(connection.as_ref(), &object_ref).await {
-                                let cached =
-                                    build_cached_object(connection.as_ref(), object_ref).await;
-                                if let Some(selected_hint) = selected.read().await.clone()
-                                    && !cached_objects_related(&selected_hint, &cached)
-                                {
-                                    *selected.write().await = None;
-                                }
-                                *focused.write().await = Some(cached);
-                            } else {
-                                *focused.write().await = None;
-                                *selected.write().await = None;
-                            }
+                            update_focus_hint(
+                                connection.as_ref(),
+                                &focused,
+                                &selected,
+                                focus.object_ref().into(),
+                            )
+                            .await;
                         }
 
                         if let Ok(ObjectEvents::TextSelectionChanged(selection)) =
                             ObjectEvents::try_from(event)
                         {
-                            let object_ref: ObjectRefOwned = selection.object_ref().into();
-                            if is_text_focus_candidate(connection.as_ref(), &object_ref).await {
-                                let cached =
-                                    build_cached_object(connection.as_ref(), object_ref).await;
-                                *focused.write().await = Some(cached.clone());
-                                *selected.write().await = Some(cached);
-                            } else {
-                                *selected.write().await = None;
-                            }
+                            update_selection_hint(
+                                connection.as_ref(),
+                                &focused,
+                                &selected,
+                                selection.object_ref().into(),
+                            )
+                            .await;
                         }
                     }
                     Err(error) => {
@@ -451,6 +469,15 @@ impl AtspiBridge {
 
 fn same_object_ref(left: &ObjectRefOwned, right: &ObjectRefOwned) -> bool {
     left.path_as_str() == right.path_as_str() && left.name_as_str() == right.name_as_str()
+}
+
+fn push_unique_object(objects: &mut Vec<ObjectRefOwned>, candidate: ObjectRefOwned) {
+    if !objects
+        .iter()
+        .any(|known| same_object_ref(known, &candidate))
+    {
+        objects.push(candidate);
+    }
 }
 
 fn cached_objects_related(left: &CachedObject, right: &CachedObject) -> bool {
@@ -545,6 +572,41 @@ async fn application_root_for_connection_object(
     match accessible.get_application().await {
         Ok(application) => Ok(Some(application)),
         Err(_) => Ok(None),
+    }
+}
+
+async fn update_focus_hint(
+    connection: &AccessibilityConnection,
+    focused: &Arc<RwLock<Option<CachedObject>>>,
+    selected: &Arc<RwLock<Option<CachedObject>>>,
+    object_ref: ObjectRefOwned,
+) {
+    if is_text_focus_candidate(connection, &object_ref).await {
+        let cached = build_cached_object(connection, object_ref).await;
+        if let Some(selected_hint) = selected.read().await.clone()
+            && !cached_objects_related(&selected_hint, &cached)
+        {
+            *selected.write().await = None;
+        }
+        *focused.write().await = Some(cached);
+    } else {
+        *focused.write().await = None;
+        *selected.write().await = None;
+    }
+}
+
+async fn update_selection_hint(
+    connection: &AccessibilityConnection,
+    focused: &Arc<RwLock<Option<CachedObject>>>,
+    selected: &Arc<RwLock<Option<CachedObject>>>,
+    object_ref: ObjectRefOwned,
+) {
+    if is_text_focus_candidate(connection, &object_ref).await {
+        let cached = build_cached_object(connection, object_ref).await;
+        *focused.write().await = Some(cached.clone());
+        *selected.write().await = Some(cached);
+    } else {
+        *selected.write().await = None;
     }
 }
 
